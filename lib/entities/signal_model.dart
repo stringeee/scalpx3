@@ -13,7 +13,7 @@ class SignalModel {
 
   @override
   String toString() {
-    return '${type.name.toUpperCase()}: $aPrice\nPower: $power';
+    return '\n\n${'=' * 60}\n${type.name.toUpperCase()}: $aPrice\nPower: $power\n[$aTime]\n${'=' * 60}';
   }
 }
 

@@ -8,53 +8,62 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 class TradeBot {
   late WebSocketChannel _channel;
+  late WebSocketChannel _mexcChannel;
   final String symbol = 'ZEC_USDT';
   Candle? lastCandle;
   SignalModel? lastSignal;
 
-  List<DealModel> buyDeals = [];
-  List<DealModel> sellDeals = [];
+  List<DealModel> deals = [];
 
   Future<void> connect() async {
     print('🔄 Подключение к фьючерсному WebSocket MEXC...');
     // Важно: используем фьючерсный эндпойнт[citation:1]
-    final uri = Uri.parse('wss://contract.mexc.com/edge');
+    final uri = Uri.parse('wss://api.hyperliquid.xyz/ws');
+    final mexcUri = Uri.parse('wss://contract.mexc.com/edge');
     _channel = WebSocketChannel.connect(uri);
+    _mexcChannel = WebSocketChannel.connect(mexcUri);
 
     // Отправляем ping каждые 15 секунд для поддержания соединения[citation:1]
     Timer.periodic(Duration(seconds: 15), (_) {
       _channel.sink.add(jsonEncode({'method': 'ping'}));
+      _mexcChannel.sink.add(jsonEncode({'method': 'ping'}));
     });
 
     _channel.stream.listen(
       _handleIncomingMessage,
       onError: (error) => print('❌ Ошибка WebSocket: $error'),
-      onDone: () => print('📴 Соединение закрыто'),
+      onDone: () => print('📴 Соединение закрыто HL'),
+    );
+
+    _mexcChannel.stream.listen(
+      _handleIncomingMessage,
+      onError: (error) => print('❌ Ошибка WebSocket: $error'),
+      onDone: () => print('📴 Соединение закрыто MEXC'),
     );
 
     // Небольшая задержка перед подпиской
     await Future.delayed(Duration(seconds: 1));
     _subscribeToDeals();
     await Future.delayed(Duration(seconds: 1));
+    _subscribeToKline();
   }
 
   void _handleIncomingMessage(dynamic message) {
-    // print(message);
     try {
-      // 1. Проверяем, является ли сообщение строкой JSON (например, ping/pong)
       if (message is String) {
         final jsonMsg = jsonDecode(message);
         if (jsonMsg['channel'] == 'pong') {
           return; // Игнорируем ответы на ping
         }
-        // Обрабатываем сообщения с данными (например, push.kline)
 
-        if (jsonMsg['channel'] == 'push.deal') {
+        if (jsonMsg['channel'] == 'push.kline') {
+          _processKlineData(jsonMsg);
+        }
+
+        if (jsonMsg['channel'] == 'trades') {
           _processDealData(jsonMsg);
         }
-      }
-      // 2. Если сообщение бинарное (Protobuf) - десериализуем
-      else if (message is List<int>) {
+      } else if (message is List<int>) {
         print(
           '⚠️ Получены бинарные данные. Убедитесь в правильной десериализации Protobuf[citation:2][citation:6].',
         );
@@ -67,10 +76,8 @@ class TradeBot {
   void _subscribeToDeals() {
     // Формат подписки на K-line для фьючерсов[citation:1]
     final subscribeMsg = {
-      'method': 'sub.deal',
-      'param': {
-        'symbol': symbol, // например, 'BTC_USDT'
-      },
+      "method": "subscribe",
+      "subscription": {"type": "trades", "coin": "ZEC"},
     };
     print('📡 Подписка на данные: $symbol');
     _channel.sink.add(jsonEncode(subscribeMsg));
@@ -80,35 +87,84 @@ class TradeBot {
     List<dynamic> data = (dealData['data'] as List);
 
     List<DealModel> deals = data.map((d) => DealModel.fromJson(d)).toList();
-    double price = 0;
-    double quantity = 0;
     for (var deal in deals) {
       // if (deal.type == 2) {
-      print("${deal.price} ${deal.quantity}");
+      // print("${deal.totalSum}");
       // }
-      // addToBuffer(deal);
+      addToBuffer(deal);
     }
   }
 
+  void _subscribeToKline() {
+    // Формат подписки на K-line для фьючерсов[citation:1]
+    final subscribeMsg = {
+      'method': 'sub.kline',
+      'param': {
+        'symbol': symbol, // например, 'BTC_USDT'
+        'interval': 'Min1', // например, 'Min15'
+      },
+    };
+    print('📡 Подписка на данные: $symbol (Min1)');
+    _mexcChannel.sink.add(jsonEncode(subscribeMsg));
+  }
+
+  void _processKlineData(dynamic klineData) {
+    // Пример обработки JSON-данных свечи[citation:1]
+    final candle = Candle(
+      open: double.parse(klineData['data']['o'].toString()),
+      high: double.parse(klineData['data']['h'].toString()),
+      low: double.parse(klineData['data']['l'].toString()),
+      close: double.parse(klineData['data']['c'].toString()),
+      volume: double.parse(klineData['data']['q'].toString()),
+      time: DateTime.fromMillisecondsSinceEpoch(klineData['data']['t'] * 1000),
+    );
+
+    lastCandle = candle;
+  }
+
   void addToBuffer(DealModel deal) {
-    if (deal.tradeSide == 1) {
-      buyDeals.add(deal);
-    } else {
-      sellDeals.add(deal);
+    deals.add(deal);
+    if (deals.length >= 100) {
+      deals.removeAt(0);
     }
 
-    double totalBuy = buyDeals
-        .map((deal) => deal.totalSum)
-        .reduce((a, b) => a + b);
+    if (deals.where((a) => a.tradeSide == "A").isNotEmpty &&
+        deals.where((b) => b.tradeSide == "B").isNotEmpty) {
+      double totalBuy = deals
+          .where((d) => d.tradeSide == 'B')
+          .map((deal) => deal.totalSum)
+          .reduce((a, b) => a + b);
 
-    double totalSell = sellDeals
-        .map((deal) => deal.totalSum)
-        .reduce((a, b) => a + b);
+      double totalSell = deals
+          .where((d) => d.tradeSide == 'A')
+          .map((deal) => deal.totalSum)
+          .reduce((a, b) => a + b);
 
-    if (totalBuy > totalSell) {
-      print('LONG: ${(totalBuy / totalSell).toStringAsFixed(2)}');
-    } else {
-      print('SHORT: ${(totalSell / totalBuy).toStringAsFixed(2)}');
+      SignalModel currentSignal;
+
+      if (lastCandle != null) {
+        if (totalBuy > totalSell) {
+          // print('LONG: ${(totalBuy / totalSell).toStringAsFixed(2)}');
+          currentSignal = SignalModel(
+            type: SignalEnum.long,
+            power: (totalBuy / totalSell),
+            aPrice: lastCandle!.close,
+            aTime: DateTime.now(),
+          );
+        } else {
+          // print('SHORT: ${(totalSell / totalBuy).toStringAsFixed(2)}');
+          currentSignal = SignalModel(
+            type: SignalEnum.short,
+            power: (totalSell / totalBuy),
+            aPrice: lastCandle!.close,
+            aTime: DateTime.now(),
+          );
+        }
+        if (lastSignal?.type != currentSignal.type) {
+          lastSignal = currentSignal;
+          print(currentSignal);
+        }
+      }
     }
   }
 }
