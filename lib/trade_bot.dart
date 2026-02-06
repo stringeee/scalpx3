@@ -8,7 +8,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 class TradeBot {
   late WebSocketChannel _channel;
-  late WebSocketChannel _mexcChannel;
   final String symbol = 'ZEC_USDT';
   Candle? lastCandle;
   SignalModel? lastSignal;
@@ -19,26 +18,17 @@ class TradeBot {
     print('🔄 Подключение к фьючерсному WebSocket MEXC...');
     // Важно: используем фьючерсный эндпойнт[citation:1]
     final uri = Uri.parse('wss://api.hyperliquid.xyz/ws');
-    final mexcUri = Uri.parse('wss://contract.mexc.com/edge');
     _channel = WebSocketChannel.connect(uri);
-    _mexcChannel = WebSocketChannel.connect(mexcUri);
 
     // Отправляем ping каждые 15 секунд для поддержания соединения[citation:1]
     Timer.periodic(Duration(seconds: 15), (_) {
       _channel.sink.add(jsonEncode({'method': 'ping'}));
-      _mexcChannel.sink.add(jsonEncode({'method': 'ping'}));
     });
 
     _channel.stream.listen(
       _handleIncomingMessage,
       onError: (error) => print('❌ Ошибка WebSocket: $error'),
       onDone: () => print('📴 Соединение закрыто HL'),
-    );
-
-    _mexcChannel.stream.listen(
-      _handleIncomingMessage,
-      onError: (error) => print('❌ Ошибка WebSocket: $error'),
-      onDone: () => print('📴 Соединение закрыто MEXC'),
     );
 
     // Небольшая задержка перед подпиской
@@ -56,12 +46,19 @@ class TradeBot {
           return; // Игнорируем ответы на ping
         }
 
-        if (jsonMsg['channel'] == 'push.kline') {
+        if (jsonMsg['channel'] == 'candle') {
           _processKlineData(jsonMsg);
         }
 
         if (jsonMsg['channel'] == 'trades') {
           _processDealData(jsonMsg);
+        }
+
+        if (jsonMsg['channel'] == 'post') {
+          print(message);
+        }
+        if (jsonMsg['channel'] == 'error') {
+          print(message);
         }
       } else if (message is List<int>) {
         print(
@@ -92,20 +89,18 @@ class TradeBot {
       // print("${deal.totalSum}");
       // }
       addToBuffer(deal);
+      // print("${deal.price} ${deal.quantity}");
     }
   }
 
   void _subscribeToKline() {
     // Формат подписки на K-line для фьючерсов[citation:1]
     final subscribeMsg = {
-      'method': 'sub.kline',
-      'param': {
-        'symbol': symbol, // например, 'BTC_USDT'
-        'interval': 'Min1', // например, 'Min15'
-      },
+      'method': 'subscribe',
+      'subscription': {"type": "candle", "coin": "ZEC", "interval": "1m"},
     };
     print('📡 Подписка на данные: $symbol (Min1)');
-    _mexcChannel.sink.add(jsonEncode(subscribeMsg));
+    _channel.sink.add(jsonEncode(subscribeMsg));
   }
 
   void _processKlineData(dynamic klineData) {
@@ -115,11 +110,43 @@ class TradeBot {
       high: double.parse(klineData['data']['h'].toString()),
       low: double.parse(klineData['data']['l'].toString()),
       close: double.parse(klineData['data']['c'].toString()),
-      volume: double.parse(klineData['data']['q'].toString()),
-      time: DateTime.fromMillisecondsSinceEpoch(klineData['data']['t'] * 1000),
+      volume: double.parse(klineData['data']['v'].toString()),
+      time: DateTime.fromMillisecondsSinceEpoch(klineData['data']['t']),
     );
 
     lastCandle = candle;
+  }
+
+  void sendOrder() {
+    final orderMessage = {
+      "method": "post",
+      "id": 256,
+      "request": {
+        "type": "action",
+        "payload": {
+          "action": {
+            "type": "order",
+            "orders": [
+              {
+                "a": 4,
+                "b": true,
+                "p": "1100",
+                "s": "0.2",
+                "r": false,
+                "t": {
+                  "limit": {"tif": "Gtc"},
+                },
+              },
+            ],
+            "grouping": "na",
+          },
+          "nonce": 1713825891591,
+          "signature": {"r": "...", "s": "...", "v": "..."},
+          "vaultAddress": "0xaF968AD4dEd405C5DFa59b07c2E11716506f4697",
+        },
+      },
+    };
+    _channel.sink.add(jsonEncode(orderMessage));
   }
 
   void addToBuffer(DealModel deal) {
@@ -163,6 +190,7 @@ class TradeBot {
         if (lastSignal?.type != currentSignal.type) {
           lastSignal = currentSignal;
           print(currentSignal);
+          // sendOrder();
         }
       }
     }

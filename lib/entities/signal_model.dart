@@ -13,7 +13,10 @@ class SignalModel {
 
   @override
   String toString() {
-    return '\n\n${'=' * 60}\n${type.name.toUpperCase()}: $aPrice\nPower: $power\n[$aTime]\n${'=' * 60}';
+    String colorLine = type == SignalEnum.long ? '\x1B[32m' : '\x1B[31m';
+
+    return '$colorLine${'=' * 60}\n$colorLine${type.name.toUpperCase()}: $aPrice\n${colorLine}Power: $power\n$colorLine[$aTime]\n$colorLine${'=' * 60}\x1B[0m';
+    // return '\x1B[31mHello\x1B[0m';
   }
 }
 
